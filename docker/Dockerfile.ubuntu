@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # 避免交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 安装基础工具
+# 安装基础工具和构建工具
 RUN apt-get update && apt-get install -y \
     bash \
     coreutils \
@@ -11,7 +11,19 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     sudo \
+    make \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装最新版本的 Go
+RUN wget -q https://go.dev/dl/go1.24.2.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.2.linux-amd64.tar.gz && \
+    rm go1.24.2.linux-amd64.tar.gz
+
+# 设置 Go 环境变量
+ENV PATH="/usr/local/go/bin:${PATH}"
+ENV GOPATH="/home/moleuser/go"
+ENV GOBIN="/home/moleuser/go/bin"
 
 # 创建测试用户
 RUN useradd -m -s /bin/bash moleuser && \

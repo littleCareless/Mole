@@ -87,6 +87,17 @@ Docker Ubuntu 测试:
 
 #### 2. 磁盘分析 (mo analyze) ✅
 
+**实测效果：**
+```
+Docker Ubuntu 测试:
+  测试数据: 126MB (large_files 81MB + nested 46MB + small_files 156KB)
+  二进制大小: 3.3MB
+  构建状态: ✅ 成功
+  平台: Linux amd64
+  Go 版本: 1.24.2
+  注意: Docker 环境需要 -it 参数才能使用 TTY
+```
+
 **功能演示：**
 ```bash
 $ mo analyze
