@@ -701,10 +701,6 @@ func getLastAccessTime(path string) time.Time {
 	return getLastAccessTimeFromInfo(info)
 }
 
-func getLastAccessTimeFromInfo(info fs.FileInfo) time.Time {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return time.Time{}
-	}
-	return time.Unix(stat.Atimespec.Sec, stat.Atimespec.Nsec)
-}
+// getLastAccessTimeFromInfo is implemented in platform-specific files:
+// - scanner_darwin.go for macOS
+// - scanner_linux.go for Linux
