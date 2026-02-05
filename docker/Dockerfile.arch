@@ -1,0 +1,32 @@
+FROM archlinux:latest
+
+# 更新系统并安装基础工具
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+    bash \
+    coreutils \
+    findutils \
+    git \
+    curl \
+    sudo \
+    && pacman -Scc --noconfirm
+
+# 创建测试用户
+RUN useradd -m -s /bin/bash moleuser && \
+    echo "moleuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# 切换到测试用户
+USER moleuser
+WORKDIR /home/moleuser
+
+# 复制代码
+COPY --chown=moleuser:moleuser . /home/moleuser/mole
+
+# 设置工作目录
+WORKDIR /home/moleuser/mole
+
+# 设置权限
+RUN chmod +x tests/*.sh 2>/dev/null || true
+
+# 默认命令
+CMD ["./tests/test_platform_simple.sh"]

@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  ubuntu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ubuntu
+    container_name: mole-ubuntu-test
+    volumes:
+      - ..:/home/moleuser/mole
+    command: ./tests/test_platform_simple.sh
+
+  fedora:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.fedora
+    container_name: mole-fedora-test
+    volumes:
+      - ..:/home/moleuser/mole
+    command: ./tests/test_platform_simple.sh
+
+  arch:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.arch
+    container_name: mole-arch-test
+    volumes:
+      - ..:/home/moleuser/mole
+    command: ./tests/test_platform_simple.sh
