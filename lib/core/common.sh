@@ -16,6 +16,10 @@ _MOLE_CORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_MOLE_CORE_DIR/base.sh"
 source "$_MOLE_CORE_DIR/log.sh"
 
+# Load platform abstraction layer (must be loaded early)
+source "$_MOLE_CORE_DIR/platform.sh"
+source "$_MOLE_CORE_DIR/package_manager.sh"
+
 source "$_MOLE_CORE_DIR/timeout.sh"
 source "$_MOLE_CORE_DIR/file_ops.sh"
 source "$_MOLE_CORE_DIR/ui.sh"
