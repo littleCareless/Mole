@@ -1,23 +1,39 @@
 #!/bin/bash
-# Cache Cleanup Module
+# Cache Cleanup Module (Cross-platform: macOS & Linux)
 set -euo pipefail
-# Preflight TCC prompts once to avoid mid-run interruptions.
+
+# Preflight TCC prompts once to avoid mid-run interruptions (macOS only).
 check_tcc_permissions() {
+    # Skip on Linux - no TCC (Transparency, Consent, and Control)
+    is_linux && return 0
+
     [[ -t 1 ]] || return 0
     local permission_flag="$HOME/.cache/mole/permissions_granted"
     [[ -f "$permission_flag" ]] && return 0
+
+    # Use platform abstraction for paths
+    local user_cache user_data user_config
+    user_cache=$(get_user_cache_dir)
+    user_data=$(get_user_data_dir)
+    user_config=$(get_user_config_dir)
+
     local -a tcc_dirs=(
-        "$HOME/Library/Caches"
-        "$HOME/Library/Logs"
-        "$HOME/Library/Application Support"
-        "$HOME/Library/Containers"
-        "$HOME/.cache"
+        "$user_cache"
+        "$user_data"
+        "$user_config"
     )
+
+    # macOS-specific: add Containers directory
+    if is_macos; then
+        tcc_dirs+=("$HOME/Library/Containers")
+    fi
+
     # Quick permission probe (avoid deep scans).
     local needs_permission_check=false
-    if ! ls "$HOME/Library/Caches" > /dev/null 2>&1; then
+    if ! ls "$user_cache" > /dev/null 2>&1; then
         needs_permission_check=true
     fi
+
     if [[ "$needs_permission_check" == "true" ]]; then
         echo ""
         echo -e "${BLUE}First-time setup${NC}"
@@ -137,8 +153,16 @@ clean_project_caches() {
             start_inline_spinner "Detecting dev projects..."
             spinner_active=true
         fi
+        # Use platform-specific exclusion paths
+        local exclude_paths
+        if is_macos; then
+            exclude_paths="-not -path '*/Library/*' -not -path '*/.Trash/*'"
+        else
+            exclude_paths="-not -path '*/.local/share/Trash/*' -not -path '*/snap/*'"
+        fi
+
         for marker in "${project_markers[@]}"; do
-            if run_with_timeout 3 sh -c "find '$HOME' -maxdepth 2 -name '$marker' -not -path '*/Library/*' -not -path '*/.Trash/*' 2>/dev/null | head -1" | grep -q .; then
+            if run_with_timeout 3 sh -c "find '$HOME' -maxdepth 2 -name '$marker' $exclude_paths 2>/dev/null | head -1" | grep -q .; then
                 has_dev_projects=true
                 break
             fi
@@ -157,11 +181,20 @@ clean_project_caches() {
     local pycache_tmp_file
     pycache_tmp_file=$(create_temp_file)
     local find_timeout=10
-    # Parallel scans (Next.js and __pycache__).
+    # Parallel scans (Next.js and __pycache__) with platform-specific exclusions
+    local trash_dir
+    trash_dir=$(get_trash_dir)
+
+    local exclude_pattern
+    if is_macos; then
+        exclude_pattern="-not -path '*/Library/*' -not -path '$trash_dir/*'"
+    else
+        exclude_pattern="-not -path '$trash_dir/*' -not -path '*/snap/*' -not -path '*/.local/share/*'"
+    fi
+
     (
         command find "$HOME" -P -mount -type d -name ".next" -maxdepth 3 \
-            -not -path "*/Library/*" \
-            -not -path "*/.Trash/*" \
+            $exclude_pattern \
             -not -path "*/node_modules/*" \
             -not -path "*/.*" \
             2> /dev/null || true
@@ -169,8 +202,7 @@ clean_project_caches() {
     local next_pid=$!
     (
         command find "$HOME" -P -mount -type d -name "__pycache__" -maxdepth 3 \
-            -not -path "*/Library/*" \
-            -not -path "*/.Trash/*" \
+            $exclude_pattern \
             -not -path "*/node_modules/*" \
             -not -path "*/.*" \
             2> /dev/null || true
