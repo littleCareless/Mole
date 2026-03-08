@@ -136,6 +136,24 @@ EOF
     [[ "$output" != *"NDK versions"* ]]
 }
 
+@test "clean_xcode_device_support handles empty directories under nounset" {
+    local ds_dir="$HOME/EmptyDeviceSupport"
+    mkdir -p "$ds_dir"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+note_activity() { :; }
+safe_clean() { :; }
+clean_xcode_device_support "$HOME/EmptyDeviceSupport" "iOS DeviceSupport"
+echo "survived"
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"survived"* ]]
+}
+
 @test "clean_xcode_documentation_cache keeps newest DeveloperDocumentation index" {
     local doc_root="$HOME/DocumentationCache"
     mkdir -p "$doc_root"
@@ -298,4 +316,28 @@ EOF
     [[ "$output" == *"REMOVE:$volumes_root/unused-runtime"* ]]
     [[ "$output" == *"$volumes_root/unused-runtime"* ]]
     [[ "$output" != *"$volumes_root/in-use-runtime"* ]]
+}
+
+@test "clean_dev_mobile continues cleanup when simctl is unavailable" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+
+check_android_ndk() { :; }
+clean_xcode_documentation_cache() { :; }
+clean_xcode_simulator_runtime_volumes() { :; }
+clean_xcode_device_support() { echo "DEVICE_SUPPORT:$2"; }
+safe_clean() { echo "SAFE_CLEAN:$2"; }
+note_activity() { :; }
+debug_log() { :; }
+xcrun() { return 1; }
+
+clean_dev_mobile
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"simctl not available"* ]]
+    [[ "$output" == *"DEVICE_SUPPORT:iOS DeviceSupport"* ]]
+    [[ "$output" == *"SAFE_CLEAN:Android SDK cache"* ]]
 }
