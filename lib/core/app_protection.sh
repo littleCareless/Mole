@@ -290,6 +290,8 @@ readonly DATA_PROTECTED_BUNDLES=(
     "clash.*"
     "Clash.*"
     "clash_*"
+    "*clash-verge*"
+    "*Clash-Verge*"
     "clashverge*"
     "ClashVerge*"
     "com.nssurge.surge-mac"
@@ -694,7 +696,7 @@ should_protect_data() {
         com.nssurge.* | com.v2ray.* | com.clash.* | ClashX* | Surge* | Shadowrocket* | Quantumult*)
             return 0
             ;;
-        clash-* | Clash-* | *-clash | *-Clash | clash.* | Clash.* | clash_* | clashverge* | ClashVerge*)
+        clash-* | Clash-* | *-clash | *-Clash | clash.* | Clash.* | clash_* | *clash-verge* | *Clash-Verge* | clashverge* | ClashVerge*)
             return 0
             ;;
         com.docker.* | com.getpostman.* | com.insomnia.*)
@@ -806,6 +808,11 @@ should_protect_path() {
             ;;
         # iCloud Drive - protect user's cloud synced data
         */Library/Mobile\ Documents* | */Mobile\ Documents*)
+            return 0
+            ;;
+        # CoreAudio and audio subsystem caches (issue #553)
+        # Cleaning these can cause audio output loss on Intel Macs
+        *com.apple.coreaudio* | *com.apple.audio.* | *coreaudiod*)
             return 0
             ;;
     esac
@@ -943,6 +950,7 @@ find_app_files() {
         "$HOME/Library/WebKit/$bundle_id"
         "$HOME/Library/WebKit/com.apple.WebKit.WebContent/$bundle_id"
         "$HOME/Library/HTTPStorages/$bundle_id"
+        "$HOME/Library/HTTPStorages/$bundle_id.binarycookies"
         "$HOME/Library/Cookies/$bundle_id.binarycookies"
         "$HOME/Library/LaunchAgents/$bundle_id.plist"
         "$HOME/Library/Application Scripts/$bundle_id"
@@ -1037,6 +1045,7 @@ find_app_files() {
     # Handle Preferences and ByHost variants (only if bundle_id is valid)
     if [[ -n "$bundle_id" && "$bundle_id" != "unknown" && ${#bundle_id} -gt 3 ]]; then
         [[ -f ~/Library/Preferences/"$bundle_id".plist ]] && files_to_clean+=("$HOME/Library/Preferences/$bundle_id.plist")
+        [[ -d ~/Library/Preferences/"$bundle_id" ]] && files_to_clean+=("$HOME/Library/Preferences/$bundle_id")
         [[ -d ~/Library/Preferences/ByHost ]] && while IFS= read -r -d '' pref; do
             files_to_clean+=("$pref")
         done < <(command find ~/Library/Preferences/ByHost -maxdepth 1 \( -name "$bundle_id*.plist" \) -print0 2> /dev/null)

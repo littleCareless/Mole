@@ -38,6 +38,44 @@ EOF
     [[ "$output" != *"Trash"* ]]
 }
 
+@test "clean_user_essentials falls back when Finder trash operations time out" {
+    mkdir -p "$HOME/.Trash"
+    touch "$HOME/.Trash/one.tmp" "$HOME/.Trash/two.tmp"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+safe_clean() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+debug_log() { :; }
+run_with_timeout() {
+    local _duration="$1"
+    shift
+    if [[ "$1" == "osascript" ]]; then
+        return 124
+    fi
+    "$@"
+}
+safe_remove() {
+    local target="$1"
+    /bin/rm -rf "$target"
+    return 0
+}
+
+clean_user_essentials
+[[ ! -e "$HOME/.Trash/one.tmp" ]] || exit 1
+[[ ! -e "$HOME/.Trash/two.tmp" ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Trash · emptied, 2 items"* ]]
+}
+
 @test "clean_app_caches includes macOS system caches" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
 set -euo pipefail
@@ -56,6 +94,24 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"Saved application states"* ]] || [[ "$output" == *"App caches"* ]]
+}
+
+@test "clean_app_caches shows spinner during initial app cache scan" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { echo "SPIN_START:$1"; }
+stop_section_spinner() { echo "SPIN_STOP"; }
+safe_clean() { :; }
+clean_support_app_data() { :; }
+clean_group_container_caches() { :; }
+
+clean_app_caches
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SPIN_START:Scanning app caches..."* ]]
 }
 
 @test "clean_support_app_data targets crash, wallpaper, and messages preview caches only" {
@@ -162,6 +218,94 @@ EOF
     total_kb=$(printf '%s\n' "$output" | sed -n 's/.*TOTAL_KB=\([0-9][0-9]*\).*/\1/p' | tail -1)
     [[ -n "$total_kb" ]]
     [[ "$total_kb" -ge 2 ]]
+}
+
+@test "clean_application_support_logs uses bulk clean for large Application Support directories" {
+    local support_home="$HOME/support-appsupport-bulk"
+    run env HOME="$support_home" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true bash --noprofile --norc <<'EOF'
+set -euo pipefail
+mkdir -p "$HOME"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { echo "SPIN:$1"; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+safe_remove() { echo "REMOVE:$1"; }
+update_progress_if_needed() { return 1; }
+should_protect_data() { return 1; }
+is_critical_system_component() { return 1; }
+bytes_to_human() { echo "0B"; }
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+
+mkdir -p "$HOME/Library/Application Support/adspower_global/logs"
+for i in $(seq 1 101); do
+    touch "$HOME/Library/Application Support/adspower_global/logs/file-$i.log"
+done
+
+clean_application_support_logs
+rm -rf "$HOME/Library/Application Support"
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SPIN:Scanning Application Support... 1/1 [adspower_global, bulk clean]"* ]]
+    [[ "$output" == *"Application Support logs/caches"* ]]
+    [[ "$output" != *"151250 items"* ]]
+    [[ "$output" != *"REMOVE:"* ]]
+}
+
+@test "clean_application_support_logs skips whitelisted application support directories" {
+    local support_home="$HOME/support-appsupport-whitelist"
+    run env HOME="$support_home" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+mkdir -p "$HOME"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+safe_remove() { echo "REMOVE:$1"; }
+update_progress_if_needed() { return 1; }
+should_protect_data() { return 1; }
+is_critical_system_component() { return 1; }
+WHITELIST_PATTERNS=("$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev")
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+
+mkdir -p "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/logs"
+touch "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/logs/runtime.log"
+
+clean_application_support_logs
+test -f "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/logs/runtime.log"
+rm -rf "$HOME/Library/Application Support"
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REMOVE:"* ]]
+}
+
+@test "app_support_entry_count_capped stops at cap without failing under pipefail" {
+    local support_home="$HOME/support-appsupport-cap"
+    run env HOME="$support_home" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+mkdir -p "$HOME"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+
+mkdir -p "$HOME/Library/Application Support/adspower_global/logs"
+for i in $(seq 1 150); do
+    touch "$HOME/Library/Application Support/adspower_global/logs/file-$i.log"
+done
+
+count=$(app_support_entry_count_capped "$HOME/Library/Application Support/adspower_global/logs" 1 101)
+echo "COUNT=$count"
+rm -rf "$HOME/Library/Application Support"
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"COUNT=101"* ]]
 }
 
 @test "clean_group_container_caches keeps protected caches and cleans non-protected caches" {

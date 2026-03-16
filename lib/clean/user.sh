@@ -10,16 +10,23 @@ clean_user_essentials() {
 
     if ! is_path_whitelisted "$HOME/.Trash"; then
         local trash_count
-        trash_count=$(osascript -e 'tell application "Finder" to count items in trash' 2> /dev/null || echo "0")
+        local trash_count_status=0
+        trash_count=$(run_with_timeout 3 osascript -e 'tell application "Finder" to count items in trash' 2> /dev/null) || trash_count_status=$?
+        if [[ $trash_count_status -eq 124 ]]; then
+            debug_log "Finder trash count timed out, using direct .Trash scan"
+            trash_count=$(command find "$HOME/.Trash" -mindepth 1 -maxdepth 1 -exec printf '.' ';' 2> /dev/null |
+                wc -c | awk '{print $1}' || echo "0")
+        fi
         [[ "$trash_count" =~ ^[0-9]+$ ]] || trash_count="0"
 
         if [[ "$DRY_RUN" == "true" ]]; then
             [[ $trash_count -gt 0 ]] && echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Trash · would empty, $trash_count items" || echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Trash · already empty"
         elif [[ $trash_count -gt 0 ]]; then
-            if osascript -e 'tell application "Finder" to empty trash' > /dev/null 2>&1; then
+            if run_with_timeout 5 osascript -e 'tell application "Finder" to empty trash' > /dev/null 2>&1; then
                 echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Trash · emptied, $trash_count items"
                 note_activity
             else
+                debug_log "Finder trash empty failed or timed out, falling back to direct deletion"
                 local cleaned_count=0
                 while IFS= read -r -d '' item; do
                     if safe_remove "$item" true; then
@@ -62,6 +69,29 @@ _clean_recent_items() {
         done
     fi
     safe_clean ~/Library/Preferences/com.apple.recentitems.plist "Recent items preferences" || true
+}
+
+# Internal: Clean incomplete browser downloads, skipping files currently open.
+_clean_incomplete_downloads() {
+    local -a patterns=(
+        "$HOME/Downloads/"*.download
+        "$HOME/Downloads/"*.crdownload
+        "$HOME/Downloads/"*.part
+    )
+    local labels=("Safari incomplete downloads" "Chrome incomplete downloads" "Partial incomplete downloads")
+    local i=0
+    for pattern in "${patterns[@]}"; do
+        local label="${labels[$i]}"
+        i=$((i + 1))
+        for f in $pattern; do
+            [[ -e "$f" ]] || continue
+            if lsof -F n -- "$f" > /dev/null 2>&1; then
+                echo -e "  ${GRAY}${ICON_WARNING}${NC} Skipping active download: $(basename "$f")"
+                continue
+            fi
+            safe_clean "$f" "$label" || true
+        done
+    done
 }
 
 # Internal: Clean old mail downloads.
@@ -420,6 +450,12 @@ clean_support_app_data() {
         safe_find_delete "$idle_assets_dir" "*" "$support_age_days" "f" || true
     fi
 
+    # Clean system-level idle/aerial screensaver videos (macOS re-downloads as needed).
+    local sys_idle_assets_dir="/Library/Application Support/com.apple.idleassetsd/Customer"
+    if sudo test -d "$sys_idle_assets_dir" 2> /dev/null; then
+        safe_sudo_find_delete "$sys_idle_assets_dir" "*" "$support_age_days" "f" || true
+    fi
+
     # Clean old aerial wallpaper videos (can be large, safe to remove).
     safe_clean ~/Library/Application\ Support/com.apple.wallpaper/aerials/videos/* "Aerial wallpaper videos"
 
@@ -435,6 +471,8 @@ clean_support_app_data() {
 
 # App caches (merged: macOS system caches + Sandboxed apps).
 clean_app_caches() {
+    start_section_spinner "Scanning app caches..."
+
     # macOS system caches (merged from clean_macos_system_caches)
     safe_clean ~/Library/Saved\ Application\ State/* "Saved application states" || true
     safe_clean ~/Library/Caches/com.apple.photoanalysisd "Photo analysis cache" || true
@@ -444,9 +482,7 @@ clean_app_caches() {
     safe_clean ~/Library/Caches/com.apple.QuickLook.thumbnailcache "QuickLook thumbnails" || true
     safe_clean ~/Library/Caches/Quick\ Look/* "QuickLook cache" || true
     safe_clean ~/Library/Caches/com.apple.iconservices* "Icon services cache" || true
-    safe_clean ~/Downloads/*.download "Safari incomplete downloads" || true
-    safe_clean ~/Downloads/*.crdownload "Chrome incomplete downloads" || true
-    safe_clean ~/Downloads/*.part "Partial incomplete downloads" || true
+    _clean_incomplete_downloads
     safe_clean ~/Library/Autosave\ Information/* "Autosave information" || true
     safe_clean ~/Library/IdentityCaches/* "Identity caches" || true
     safe_clean ~/Library/Suggestions/* "Siri suggestions cache" || true
@@ -454,8 +490,10 @@ clean_app_caches() {
     safe_clean ~/Library/Application\ Support/AddressBook/Sources/*/Photos.cache "Address Book photo cache" || true
     clean_support_app_data
 
-    # Sandboxed app caches
+    # Stop initial scan indicator before entering per-group scans.
     stop_section_spinner
+
+    # Sandboxed app caches
     safe_clean ~/Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/* "Wallpaper agent cache"
     safe_clean ~/Library/Containers/com.apple.mediaanalysisd/Data/Library/Caches/* "Media analysis cache"
     safe_clean ~/Library/Containers/com.apple.AppStore/Data/Library/Caches/* "App Store cache"
@@ -668,6 +706,15 @@ clean_browsers() {
     safe_clean ~/Library/Caches/company.thebrowser.Browser/* "Arc cache"
     safe_clean ~/Library/Caches/company.thebrowser.dia/* "Dia cache"
     safe_clean ~/Library/Caches/BraveSoftware/Brave-Browser/* "Brave cache"
+    # Helium Browser.
+    safe_clean ~/Library/Caches/net.imput.helium/* "Helium cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/*/GPUCache/* "Helium GPU cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/component_crx_cache/* "Helium component cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/extensions_crx_cache/* "Helium extensions cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/GrShaderCache/* "Helium shader cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/GraphiteDawnCache/* "Helium Dawn cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/ShaderCache/* "Helium shader cache"
+    safe_clean ~/Library/Application\ Support/net.imput.helium/*/Application\ Cache/* "Helium app cache"
     # Yandex Browser.
     safe_clean ~/Library/Caches/Yandex/YandexBrowser/* "Yandex cache"
     safe_clean ~/Library/Application\ Support/Yandex/YandexBrowser/ShaderCache/* "Yandex shader cache"
@@ -732,6 +779,23 @@ clean_virtualization_tools() {
 
 # Estimate item size for Application Support cleanup.
 # Files use stat; directories use du with timeout to avoid long blocking scans.
+app_support_entry_count_capped() {
+    local dir="$1"
+    local maxdepth="${2:-1}"
+    local cap="${3:-101}"
+    local count=0
+
+    while IFS= read -r -d '' _entry; do
+        count=$((count + 1))
+        if ((count >= cap)); then
+            break
+        fi
+    done < <(command find "$dir" -mindepth 1 -maxdepth "$maxdepth" -print0 2> /dev/null)
+
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    printf '%s\n' "$count"
+}
+
 app_support_item_size_bytes() {
     local item="$1"
     local timeout_seconds="${2:-0.4}"
@@ -745,9 +809,19 @@ app_support_item_size_bytes() {
     fi
 
     if [[ -d "$item" && ! -L "$item" ]]; then
+        # Fast path: if directory has too many items, skip detailed size calculation
+        # to avoid hanging on deep directories (e.g., node_modules, .git)
+        local item_count
+        item_count=$(app_support_entry_count_capped "$item" 2 10001)
+        if [[ "$item_count" -gt 10000 ]]; then
+            # Return 1 to signal "too many items, size unknown"
+            return 1
+        fi
+
         local du_tmp
         du_tmp=$(mktemp)
         local du_status=0
+        # Use stricter timeout for directories
         if run_with_timeout "$timeout_seconds" du -skP "$item" > "$du_tmp" 2> /dev/null; then
             du_status=0
         else
@@ -813,7 +887,11 @@ clean_application_support_logs() {
         local app_name_lower
         app_name_lower=$(echo "$app_name" | LC_ALL=C tr '[:upper:]' '[:lower:]')
         local is_protected=false
-        if should_protect_data "$app_name"; then
+        if is_path_whitelisted "$app_dir" 2> /dev/null; then
+            is_protected=true
+        elif should_protect_path "$app_dir" 2> /dev/null; then
+            is_protected=true
+        elif should_protect_data "$app_name"; then
             is_protected=true
         elif should_protect_data "$app_name_lower"; then
             is_protected=true
@@ -827,12 +905,39 @@ clean_application_support_logs() {
         local -a start_candidates=("$app_dir/log" "$app_dir/logs" "$app_dir/activitylog" "$app_dir/Cache/Cache_Data" "$app_dir/Crashpad/completed")
         for candidate in "${start_candidates[@]}"; do
             if [[ -d "$candidate" ]]; then
+                if should_protect_path "$candidate" 2> /dev/null || is_path_whitelisted "$candidate" 2> /dev/null; then
+                    continue
+                fi
+                # Quick count check - skip if too many items to avoid hanging
+                local quick_count
+                quick_count=$(app_support_entry_count_capped "$candidate" 1 101)
+                if [[ "$quick_count" -gt 100 ]]; then
+                    # Too many items - use bulk removal instead of item-by-item
+                    local app_label="$app_name"
+                    if [[ ${#app_label} -gt 24 ]]; then
+                        app_label="${app_label:0:21}..."
+                    fi
+                    stop_section_spinner
+                    start_section_spinner "Scanning Application Support... $app_count/$total_apps [$app_label, bulk clean]"
+                    if [[ "$DRY_RUN" != "true" ]]; then
+                        # Remove entire candidate directory in one go
+                        safe_remove "$candidate" true > /dev/null 2>&1 || true
+                    fi
+                    found_any=true
+                    cleaned_count=$((cleaned_count + 1))
+                    total_size_partial=true
+                    continue
+                fi
+
                 local item_found=false
                 local candidate_size_bytes=0
                 local candidate_size_partial=false
                 local candidate_item_count=0
                 while IFS= read -r -d '' item; do
                     [[ -e "$item" ]] || continue
+                    if should_protect_path "$item" 2> /dev/null || is_path_whitelisted "$item" 2> /dev/null; then
+                        continue
+                    fi
                     item_found=true
                     candidate_item_count=$((candidate_item_count + 1))
                     if [[ ! -L "$item" && (-f "$item" || -d "$item") ]]; then
@@ -882,6 +987,25 @@ clean_application_support_logs() {
         local -a gc_candidates=("$container_path/Logs" "$container_path/Library/Logs")
         for candidate in "${gc_candidates[@]}"; do
             if [[ -d "$candidate" ]]; then
+                # Quick count check - skip if too many items
+                local quick_count
+                quick_count=$(app_support_entry_count_capped "$candidate" 1 101)
+                if [[ "$quick_count" -gt 100 ]]; then
+                    local container_label="$container"
+                    if [[ ${#container_label} -gt 24 ]]; then
+                        container_label="${container_label:0:21}..."
+                    fi
+                    stop_section_spinner
+                    start_section_spinner "Scanning Application Support... group [$container_label, bulk clean]"
+                    if [[ "$DRY_RUN" != "true" ]]; then
+                        safe_remove "$candidate" true > /dev/null 2>&1 || true
+                    fi
+                    found_any=true
+                    cleaned_count=$((cleaned_count + 1))
+                    total_size_partial=true
+                    continue
+                fi
+
                 local item_found=false
                 local candidate_size_bytes=0
                 local candidate_size_partial=false

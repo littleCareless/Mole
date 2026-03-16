@@ -60,7 +60,7 @@ EOF
 }
 
 @test "is_bundle_orphaned returns true for old uninstalled bundle" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ORPHAN_AGE_THRESHOLD=60 bash --noprofile --norc <<'EOF'
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ORPHAN_AGE_THRESHOLD=30 bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
@@ -116,12 +116,12 @@ safe_clean() {
 # Create required Library structure for permission check
 mkdir -p "$HOME/Library/Caches"
 
-# Create test structure with spaces in path (old modification time: 61 days ago)
+# Create test structure with spaces in path (old modification time: 31 days ago)
 mkdir -p "$HOME/Library/Saved Application State/com.test.orphan.savedState"
 # Create a file with some content so directory size > 0
 echo "test data" > "$HOME/Library/Saved Application State/com.test.orphan.savedState/data.plist"
-# Set modification time to 61 days ago (older than 60-day threshold)
-touch -t "$(date -v-61d +%Y%m%d%H%M.%S 2>/dev/null || date -d '61 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Saved Application State/com.test.orphan.savedState" 2>/dev/null || true
+# Set modification time to 31 days ago (older than 30-day threshold)
+touch -t "$(date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Saved Application State/com.test.orphan.savedState" 2>/dev/null || true
 
 # Disable spinner for test
 start_section_spinner() { :; }
@@ -165,15 +165,15 @@ run_with_timeout() { shift; "$@"; }
 # Create required Library structure for permission check
 mkdir -p "$HOME/Library/Caches"
 
-# Create test files (old modification time: 61 days ago)
+# Create test files (old modification time: 31 days ago)
 mkdir -p "$HOME/Library/Caches/com.test.orphan1"
 mkdir -p "$HOME/Library/Caches/com.test.orphan2"
 # Create files with content so size > 0
 echo "data1" > "$HOME/Library/Caches/com.test.orphan1/data"
 echo "data2" > "$HOME/Library/Caches/com.test.orphan2/data"
-# Set modification time to 61 days ago
-touch -t "$(date -v-61d +%Y%m%d%H%M.%S 2>/dev/null || date -d '61 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan1" 2>/dev/null || true
-touch -t "$(date -v-61d +%Y%m%d%H%M.%S 2>/dev/null || date -d '61 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan2" 2>/dev/null || true
+# Set modification time to 31 days ago
+touch -t "$(date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan1" 2>/dev/null || true
+touch -t "$(date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan2" 2>/dev/null || true
 
 # Mock safe_clean to fail on first item, succeed on second
 safe_clean() {
@@ -208,6 +208,135 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"PASS: Failed deletion preserved"* ]]
     [[ "$output" == *"PASS: Successful deletion removed"* ]]
+}
+
+@test "clean_orphaned_app_data removes orphaned Claude VM bundle" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+
+scan_installed_apps() {
+    : > "$1"
+}
+
+mdfind() {
+    return 0
+}
+
+pgrep() {
+    return 1
+}
+
+run_with_timeout() { shift; "$@"; }
+get_file_mtime() { echo 0; }
+get_path_size_kb() { echo 4; }
+
+safe_clean() {
+    echo "$2"
+    rm -rf "$1"
+}
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+
+mkdir -p "$HOME/Library/Caches"
+mkdir -p "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle"
+echo "vm data" > "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle/rootfs.img"
+
+clean_orphaned_app_data
+
+if [[ ! -d "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle" ]]; then
+    echo "PASS: Claude VM removed"
+fi
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Orphaned Claude workspace VM"* ]]
+    [[ "$output" == *"PASS: Claude VM removed"* ]]
+}
+
+@test "clean_orphaned_app_data keeps recent Claude VM bundle when Claude lookup misses" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+
+scan_installed_apps() {
+    : > "$1"
+}
+
+mdfind() {
+    return 0
+}
+
+pgrep() {
+    return 1
+}
+
+run_with_timeout() { shift; "$@"; }
+get_file_mtime() { date +%s; }
+
+safe_clean() {
+    echo "UNEXPECTED:$2"
+    return 1
+}
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+
+mkdir -p "$HOME/Library/Caches"
+mkdir -p "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle"
+echo "vm data" > "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle/rootfs.img"
+
+clean_orphaned_app_data
+
+if [[ -d "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle" ]]; then
+    echo "PASS: Recent Claude VM kept"
+fi
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"UNEXPECTED:Orphaned Claude workspace VM"* ]]
+    [[ "$output" == *"PASS: Recent Claude VM kept"* ]]
+}
+
+@test "clean_orphaned_app_data keeps Claude VM bundle when Claude is installed" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+
+scan_installed_apps() {
+    echo "com.anthropic.claudefordesktop" > "$1"
+}
+
+pgrep() {
+    return 1
+}
+
+safe_clean() {
+    echo "UNEXPECTED:$2"
+    return 1
+}
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+
+mkdir -p "$HOME/Library/Caches"
+mkdir -p "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle"
+echo "vm data" > "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle/rootfs.img"
+
+clean_orphaned_app_data
+
+if [[ -d "$HOME/Library/Application Support/Claude/vm_bundles/claudevm.bundle" ]]; then
+    echo "PASS: Claude VM kept"
+fi
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"UNEXPECTED:Orphaned Claude workspace VM"* ]]
+    [[ "$output" == *"PASS: Claude VM kept"* ]]
 }
 
 
@@ -283,142 +412,31 @@ EOF
     [[ "$output" != *"launchctl-called"* ]]
 }
 
-@test "is_launch_item_orphaned detects orphan when program missing" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/apps.sh"
-
-tmp_dir="$(mktemp -d)"
-tmp_plist="$tmp_dir/com.test.orphan.plist"
-
-cat > "$tmp_plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.test.orphan</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/nonexistent/app/program</string>
-    </array>
-</dict>
-</plist>
-PLIST
-
-run_with_timeout() { shift; "$@"; }
-
-if is_launch_item_orphaned "$tmp_plist"; then
-    echo "orphan"
-fi
-
-rm -rf "$tmp_dir"
-EOF
-
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"orphan"* ]]
-}
-
-@test "is_launch_item_orphaned protects when program exists" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/apps.sh"
-
-tmp_dir="$(mktemp -d)"
-tmp_plist="$tmp_dir/com.test.active.plist"
-tmp_program="$tmp_dir/program"
-touch "$tmp_program"
-
-cat > "$tmp_plist" << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.test.active</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$tmp_program</string>
-    </array>
-</dict>
-</plist>
-PLIST
-
-run_with_timeout() { shift; "$@"; }
-
-if is_launch_item_orphaned "$tmp_plist"; then
-    echo "orphan"
-else
-    echo "not-orphan"
-fi
-
-rm -rf "$tmp_dir"
-EOF
-
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"not-orphan"* ]]
-}
-
-@test "is_launch_item_orphaned protects when app support active" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/apps.sh"
-
-tmp_dir="$(mktemp -d)"
-tmp_plist="$tmp_dir/com.test.appsupport.plist"
-
-mkdir -p "$HOME/Library/Application Support/TestApp"
-touch "$HOME/Library/Application Support/TestApp/recent.txt"
-
-cat > "$tmp_plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.test.appsupport</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$HOME/Library/Application Support/TestApp/Current/app</string>
-    </array>
-</dict>
-</plist>
-PLIST
-
-run_with_timeout() { shift; "$@"; }
-
-if is_launch_item_orphaned "$tmp_plist"; then
-    echo "orphan"
-else
-    echo "not-orphan"
-fi
-
-rm -rf "$tmp_dir"
-rm -rf "$HOME/Library/Application Support/TestApp"
-EOF
-
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"not-orphan"* ]]
-}
-
-@test "clean_orphaned_launch_agents skips when no orphans" {
+@test "clean_orphaned_launch_agents preserves user launch agents" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
 
 mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$HOME/Library/LaunchAgents/com.example.custom-task.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.custom-task</string>
+</dict>
+</plist>
+PLIST
 
 start_section_spinner() { :; }
 stop_section_spinner() { :; }
 note_activity() { :; }
-get_path_size_kb() { echo "1"; }
-run_with_timeout() { shift; "$@"; }
 
 clean_orphaned_launch_agents
+
+[[ -f "$HOME/Library/LaunchAgents/com.example.custom-task.plist" ]]
 EOF
 
     [ "$status" -eq 0 ]

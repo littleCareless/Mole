@@ -1,3 +1,5 @@
+//go:build darwin
+
 package main
 
 import (
@@ -77,16 +79,7 @@ func scanPathConcurrent(root string, filesScanned, dirsScanned, bytesScanned *in
 	largeFileMinSize := int64(largeFileWarmupMinSize)
 
 	// Worker pool sized for I/O-bound scanning.
-	numWorkers := max(runtime.NumCPU()*cpuMultiplier, minWorkers)
-	if numWorkers > maxWorkers {
-		numWorkers = maxWorkers
-	}
-	if numWorkers > len(children) {
-		numWorkers = len(children)
-	}
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
+	numWorkers := max(min(max(runtime.NumCPU()*cpuMultiplier, minWorkers), maxWorkers, len(children)), 1)
 	sem := make(chan struct{}, numWorkers)
 	dirSem := make(chan struct{}, min(runtime.NumCPU()*2, maxDirWorkers))
 	duSem := make(chan struct{}, min(4, runtime.NumCPU()))        // limits concurrent du processes
@@ -95,13 +88,7 @@ func scanPathConcurrent(root string, filesScanned, dirsScanned, bytesScanned *in
 
 	// Collect results via channels.
 	// Cap buffer size to prevent memory spikes with huge directories.
-	entryBufSize := len(children)
-	if entryBufSize > 4096 {
-		entryBufSize = 4096
-	}
-	if entryBufSize < 1 {
-		entryBufSize = 1
-	}
+	entryBufSize := max(min(len(children), 4096), 1)
 	entryChan := make(chan dirEntry, entryBufSize)
 	largeFileChan := make(chan fileEntry, maxLargeFiles*2)
 
@@ -422,6 +409,16 @@ func calculateDirSizeFast(root string, filesScanned, dirsScanned, bytesScanned *
 
 // Use Spotlight (mdfind) to quickly find large files.
 func findLargeFilesWithSpotlight(root string, minSize int64) []fileEntry {
+	// Validate root path.
+	if err := validatePath(root); err != nil {
+		return nil
+	}
+
+	// Validate minSize is reasonable (non-negative and not excessively large).
+	if minSize < 0 || minSize > 1<<50 { // 1 PB max
+		return nil
+	}
+
 	query := fmt.Sprintf("kMDItemFSSize >= %d", minSize)
 
 	ctx, cancel := context.WithTimeout(context.Background(), mdlsTimeout)
@@ -648,6 +645,16 @@ func getDirectorySizeFromDu(path string) (int64, error) {
 }
 
 func getDirectorySizeFromDuWithExclude(path string, excludePath string) (int64, error) {
+	// Validate paths.
+	if err := validatePath(path); err != nil {
+		return 0, err
+	}
+	if excludePath != "" {
+		if err := validatePath(excludePath); err != nil {
+			return 0, err
+		}
+	}
+
 	runDuSize := func(target string) (int64, error) {
 		if _, err := os.Stat(target); err != nil {
 			return 0, err

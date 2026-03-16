@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/disk"
@@ -22,6 +24,23 @@ var skipDiskMounts = map[string]bool{
 	"/dev":                     true,
 }
 
+var skipDiskFSTypes = map[string]bool{
+	"afpfs":   true,
+	"autofs":  true,
+	"cifs":    true,
+	"devfs":   true,
+	"fuse":    true,
+	"fuseblk": true,
+	"fusefs":  true,
+	"macfuse": true,
+	"nfs":     true,
+	"osxfuse": true,
+	"procfs":  true,
+	"smbfs":   true,
+	"tmpfs":   true,
+	"webdav":  true,
+}
+
 func collectDisks() ([]DiskStatus, error) {
 	partitions, err := disk.Partitions(false)
 	if err != nil {
@@ -34,17 +53,7 @@ func collectDisks() ([]DiskStatus, error) {
 		seenVolume = make(map[string]bool)
 	)
 	for _, part := range partitions {
-		if strings.HasPrefix(part.Device, "/dev/loop") {
-			continue
-		}
-		if skipDiskMounts[part.Mountpoint] {
-			continue
-		}
-		if strings.HasPrefix(part.Mountpoint, "/System/Volumes/") {
-			continue
-		}
-		// Skip /private mounts.
-		if strings.HasPrefix(part.Mountpoint, "/private/") {
+		if shouldSkipDiskPartition(part) {
 			continue
 		}
 		baseDevice := baseDeviceName(part.Device)
@@ -67,12 +76,18 @@ func collectDisks() ([]DiskStatus, error) {
 		if seenVolume[volKey] {
 			continue
 		}
+		used := usage.Used
+		usedPercent := usage.UsedPercent
+		if runtime.GOOS == "darwin" && strings.ToLower(part.Fstype) == "apfs" {
+			used, usedPercent = correctAPFSDiskUsage(part.Mountpoint, usage.Total, usage.Used)
+		}
+
 		disks = append(disks, DiskStatus{
 			Mount:       part.Mountpoint,
 			Device:      part.Device,
-			Used:        usage.Used,
+			Used:        used,
 			Total:       usage.Total,
-			UsedPercent: usage.UsedPercent,
+			UsedPercent: usedPercent,
 			Fstype:      part.Fstype,
 		})
 		seenDevice[baseDevice] = true
@@ -97,11 +112,45 @@ func collectDisks() ([]DiskStatus, error) {
 	return disks, nil
 }
 
+func shouldSkipDiskPartition(part disk.PartitionStat) bool {
+	if strings.HasPrefix(part.Device, "/dev/loop") {
+		return true
+	}
+	if skipDiskMounts[part.Mountpoint] {
+		return true
+	}
+	if strings.HasPrefix(part.Mountpoint, "/System/Volumes/") {
+		return true
+	}
+	if strings.HasPrefix(part.Mountpoint, "/private/") {
+		return true
+	}
+
+	fstype := strings.ToLower(part.Fstype)
+	if skipDiskFSTypes[fstype] || strings.Contains(fstype, "fuse") {
+		return true
+	}
+
+	// On macOS, local disks should come from /dev. This filters sshfs/macFUSE-style
+	// mounts that can mirror the root volume and show up as duplicate internal disks.
+	if runtime.GOOS == "darwin" && part.Device != "" && !strings.HasPrefix(part.Device, "/dev/") {
+		return true
+	}
+
+	return false
+}
+
 var (
 	// External disk cache.
 	lastDiskCacheAt time.Time
 	diskTypeCache   = make(map[string]bool)
 	diskCacheTTL    = 2 * time.Minute
+
+	// Finder startup disk usage cache (macOS APFS purgeable-aware).
+	finderDiskCacheMu  sync.Mutex
+	finderDiskCachedAt time.Time
+	finderDiskFree     uint64
+	finderDiskTotal    uint64
 )
 
 func annotateDiskTypes(disks []DiskStatus) {
@@ -177,6 +226,114 @@ func isExternalDisk(device string) (bool, error) {
 		return false, errors.New("diskutil info missing Internal field")
 	}
 	return external, nil
+}
+
+// correctAPFSDiskUsage returns Finder-accurate used bytes and percent for an
+// APFS volume, accounting for purgeable caches and APFS local snapshots that
+// statfs incorrectly counts as "used". Uses a three-tier fallback:
+//  1. Finder via osascript (startup disk only) — exact match with macOS Finder
+//  2. diskutil APFSContainerFree — corrects APFS snapshot space
+//  3. Raw gopsutil values — original statfs-based calculation
+func correctAPFSDiskUsage(mountpoint string, total, rawUsed uint64) (used uint64, usedPercent float64) {
+	// Tier 1: Finder via osascript (startup disk at "/" only).
+	if mountpoint == "/" && commandExists("osascript") {
+		if finderFree, finderTotal, err := getFinderStartupDiskFreeBytes(); err == nil &&
+			finderTotal > 0 && finderFree <= finderTotal {
+			used = finderTotal - finderFree
+			usedPercent = float64(used) / float64(finderTotal) * 100.0
+			return
+		}
+	}
+
+	// Tier 2: diskutil APFSContainerFree (corrects APFS local snapshots).
+	if commandExists("diskutil") {
+		if containerFree, err := getAPFSContainerFreeBytes(mountpoint); err == nil && containerFree <= total {
+			corrected := total - containerFree
+			// Only apply if it meaningfully differs (>1GB) from raw to avoid noise.
+			if rawUsed > corrected && rawUsed-corrected > 1<<30 {
+				used = corrected
+				usedPercent = float64(used) / float64(total) * 100.0
+				return
+			}
+		}
+	}
+
+	// Tier 3: fall back to raw gopsutil values.
+	return rawUsed, float64(rawUsed) / float64(total) * 100.0
+}
+
+// getAPFSContainerFreeBytes returns the APFS container free space (including
+// purgeable snapshot space) by parsing `diskutil info -plist`. This corrects
+// for APFS local snapshots which statfs counts as used.
+func getAPFSContainerFreeBytes(mountpoint string) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	out, err := runCmd(ctx, "diskutil", "info", "-plist", mountpoint)
+	if err != nil {
+		return 0, err
+	}
+
+	const key = "<key>APFSContainerFree</key>"
+	_, rest, found := strings.Cut(out, key)
+	if !found {
+		return 0, fmt.Errorf("APFSContainerFree not found")
+	}
+
+	_, rest, found = strings.Cut(rest, "<integer>")
+	if !found {
+		return 0, fmt.Errorf("APFSContainerFree value not found")
+	}
+
+	value, _, found := strings.Cut(rest, "</integer>")
+	if !found {
+		return 0, fmt.Errorf("APFSContainerFree end tag not found")
+	}
+
+	val, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse APFSContainerFree: %v", err)
+	}
+	return val, nil
+}
+
+// getFinderStartupDiskFreeBytes queries Finder via osascript for the startup
+// disk free space. Finder's value includes purgeable caches and APFS snapshots,
+// matching the "X GB of Y GB used" display. Results are cached for 2 minutes.
+func getFinderStartupDiskFreeBytes() (free, total uint64, err error) {
+	finderDiskCacheMu.Lock()
+	defer finderDiskCacheMu.Unlock()
+
+	if !finderDiskCachedAt.IsZero() && time.Since(finderDiskCachedAt) < diskCacheTTL {
+		return finderDiskFree, finderDiskTotal, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Single call returns both values as a comma-separated pair.
+	out, err := runCmd(ctx, "osascript", "-e",
+		`tell application "Finder" to return {free space of startup disk, capacity of startup disk}`)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// Output format: "3.2489E+11, 4.9438E+11" or "324892202048, 494384795648"
+	parts := strings.SplitN(strings.TrimSpace(out), ",", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("unexpected osascript output: %q", out)
+	}
+
+	freeF, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	totalF, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err1 != nil || err2 != nil || freeF <= 0 || totalF <= 0 {
+		return 0, 0, fmt.Errorf("failed to parse osascript output: %q", out)
+	}
+
+	finderDiskFree = uint64(freeF)
+	finderDiskTotal = uint64(totalF)
+	finderDiskCachedAt = time.Now()
+	return finderDiskFree, finderDiskTotal, nil
 }
 
 func (c *Collector) collectDiskIO(now time.Time) DiskIOStatus {
