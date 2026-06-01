@@ -11,23 +11,38 @@ import (
 )
 
 func collectMemory() (MemoryStatus, error) {
+	return collectMemoryWithOptions(true)
+}
+
+func collectMemoryFast() (MemoryStatus, error) {
+	return collectMemoryWithOptions(false)
+}
+
+func collectMemoryWithOptions(includeSlowAnnotations bool) (MemoryStatus, error) {
 	vm, err := mem.VirtualMemory()
 	if err != nil {
 		return MemoryStatus{}, err
 	}
 
 	swap, _ := mem.SwapMemory()
-	pressure := getMemoryPressure()
+	if swap == nil {
+		swap = &mem.SwapMemoryStat{}
+	}
+	var pressure string
+	if includeSlowAnnotations {
+		pressure = getMemoryPressure()
+	}
 
 	// On macOS, vm.Cached is 0, so we calculate from file-backed pages.
 	cached := vm.Cached
-	if runtime.GOOS == "darwin" && cached == 0 {
+	if includeSlowAnnotations && runtime.GOOS == "darwin" && cached == 0 {
 		cached = getFileBackedMemory()
 	}
 
 	return MemoryStatus{
 		Used:        vm.Used,
 		Total:       vm.Total,
+		Available:   vm.Available,
 		UsedPercent: vm.UsedPercent,
 		SwapUsed:    swap.Used,
 		SwapTotal:   swap.Total,

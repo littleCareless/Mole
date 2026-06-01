@@ -13,6 +13,11 @@ clean_homebrew() {
         fi
         return 0
     fi
+    # Keep behavior consistent with dry-run preview.
+    if is_path_whitelisted "$HOME/Library/Caches/Homebrew"; then
+        echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Homebrew · skipped whitelist"
+        return 0
+    fi
     # Skip if cleaned recently to avoid repeated heavy operations.
     local brew_cache_file="${HOME}/.cache/mole/brew_last_cleanup"
     local cache_valid_days=7
@@ -34,7 +39,7 @@ clean_homebrew() {
     local skip_cleanup=false
     local brew_cache_size=0
     if [[ -d ~/Library/Caches/Homebrew ]]; then
-        brew_cache_size=$(run_with_timeout 3 du -skP ~/Library/Caches/Homebrew 2> /dev/null | awk '{print $1}')
+        brew_cache_size=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" du -skP ~/Library/Caches/Homebrew 2> /dev/null | awk '{print $1}')
         local du_exit=$?
         if [[ $du_exit -eq 0 && -n "$brew_cache_size" && "$brew_cache_size" -lt 51200 ]]; then
             skip_cleanup=true
@@ -56,7 +61,7 @@ clean_homebrew() {
     local autoremove_exit=0
     if [[ "$skip_cleanup" == "false" ]]; then
         brew_tmp_file=$(create_temp_file)
-        run_with_timeout "$timeout_seconds" brew cleanup > "$brew_tmp_file" 2>&1 &
+        run_with_timeout "$timeout_seconds" brew cleanup --prune=30 > "$brew_tmp_file" 2>&1 &
         brew_pid=$!
     fi
     autoremove_tmp_file=$(create_temp_file)
